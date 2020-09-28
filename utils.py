@@ -2,7 +2,7 @@ import pickle
 import numpy as np
 import os
 
-def load_cifar(path = "cifar-10-batches-py"):
+def load_cifar(path = "../../../datasets/cifar-10-batches-py"):
 	train_batches = []
 	train_labels = []
 
