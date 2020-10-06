@@ -1,6 +1,6 @@
 # Convolutional Neural Tangent Kernel (CNTK)
 
-This repository contains the code for Convolutional Neural Tangent Kernel (CNTK) in the following paper 
+This repository contains the code for Convolutional Neural Tangent Kernel (CNTK) in the following paper. I have made some modifications to run it on different datasets.
 
 [On Exact Computation with an Infinitely Wide Neural Net](https://arxiv.org/abs/1904.11955) (NeurIPS 2019)
 
