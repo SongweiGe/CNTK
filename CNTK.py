@@ -3,9 +3,12 @@ import numpy as np
 import argparse
 import scipy.linalg
 from utils import load_cifar
+from PIL import Image
+from time import time
 
 parser = argparse.ArgumentParser(description = 'Convolutional Neural Tangent Kernel (CNTK) for CIFAR-10')
 parser.add_argument('--depth', default = 21, type = int, help = 'depth of CNTK (#conv layers + 1)')
+parser.add_argument('--num_train', default = 100, type = int, help = 'number of training samples')
 parser.add_argument('--gap', default = "yes", type = str, help = 'whether GAP (global average pooling) is used')
 parser.add_argument('--fix', default = "yes", type = str, help = 'whether first layer and last layer are fixed (or trained) (see Section 4.2 in our paper)')
 args = parser.parse_args()
@@ -74,13 +77,11 @@ trans_threads = (8, 8)
 def xx(x):
 	RL = [1.0, ]
 	iRL = [1.0, ]
-
 	S = cp.matmul(x.T, x).reshape(32, 32, 32, 32)
 	conv3(conv_blocks, conv_threads, (S, S))
 	T = cp.zeros((32, 32, 32, 32), dtype = cp.float32)
 	if not fix:
 		T += S
-
 	for i in range(1, d - 1):
 		L = cp.sqrt(cp.diag(S.reshape(1024, 1024)).reshape(32, 32))
 		iL = 1.0 / L
@@ -89,13 +90,11 @@ def xx(x):
 		trans(trans_blocks, trans_threads, (S, T, L, L, iL, iL))		
 		conv3(conv_blocks, conv_threads, (S, S))
 		conv3(conv_blocks, conv_threads, (T, T))
-
 	L = cp.sqrt(cp.diag(S.reshape(1024, 1024)).reshape(32, 32))
 	iL = 1.0 / L
 	RL.append(L)
 	iRL.append(iL)
 	trans(trans_blocks, trans_threads, (S, T, L, L, iL, iL))	
-	
 	if fix:
 		T -= S
 	return RL, iRL
@@ -109,46 +108,80 @@ def xz(x, z, Lx, Lz, iLx, iLz):
 	T = cp.zeros((32, 32, 32, 32), dtype = cp.float32)
 	if not fix:
 		T += S
-
 	for i in range(1, d - 1):
 		trans(trans_blocks, trans_threads, (S, T, Lx[i], Lz[i], iLx[i], iLz[i]))		
 		conv3(conv_blocks, conv_threads, (S, S))
 		conv3(conv_blocks, conv_threads, (T, T))
-
 	trans(trans_blocks, trans_threads, (S, T, Lx[-1], Lz[-1], iLx[-1], iLz[-1]))	
-
 	if fix:
 		T -= S	
 	return cp.mean(T) if gap else cp.trace(T.reshape(1024, 1024))
 
 #Load CIFAR-10.
-(X_train, y_train), (X_test, y_test) = load_cifar()
-X = np.concatenate((X_train, X_test), axis = 0)
-N = X.shape[0]
-N_train = X_train.shape[0]
-N_test = X_test.shape[0]
-X = cp.asarray(X).reshape(-1, 3, 1024)
+(X_train_all, y_train_all), (X_test, y_test) = load_cifar('/fs/vulcan-datasets/cifar-10-python')
 
-#Calculate diagonal entries.
-L = []
-iL = []
-for i in range(N):
-	Lx, iLx = xx(X[i])	
-	L.append(Lx)
-	iL.append(iLx)
+for trial_i in range(5):
+	begin_time = time()
+	X_train = X_train_all[trial_i*args.num_train:(trial_i+1)*args.num_train]
+	y_train = y_train_all[trial_i*args.num_train:(trial_i+1)*args.num_train]
+	# X_test = X_test[:100]
+	# y_test = y_test[:100]
+	X = np.concatenate((X_train, X_test), axis = 0)
+	N = X.shape[0]
+	N_train = X_train.shape[0]
+	N_test = X_test.shape[0]
+	X = cp.asarray(X).reshape(-1, 3, 1024)
+	#Calculate diagonal entries.
+	L = []
+	iL = []
+	for i in range(N):
+		# print(i)
+		Lx, iLx = xx(X[i])	
+		L.append(Lx)
+		iL.append(iLx)
+	#####Calculate kernel values.
+	#####Below we provide a naive implementation using for-loops.
+	#####Parallelize this part according to your specific computing enviroment to utilize multiple GPUs.
+	H = np.zeros((N, N), dtype = np.float32)
+	for i in range(N):
+		for j in range(N_train):
+			# print(i, j)
+			H[i][j] = xz(X[i], X[j], L[i], L[j], iL[i], iL[j])
+	#####
+	#Solve kernel regression.
+	Y_train = np.ones((N_train, 10)) * -0.1
+	for i in range(N_train):
+		Y_train[i][y_train[i]] = 0.9
+	u = H[N_train:, :N_train].dot(scipy.linalg.solve(H[:N_train, :N_train], Y_train))
+	print("Trail: %d, number of layers: %d, Number of training samples: %d, test accuracy: %.4f"%(trial_i, args.depth, args.num_train, 1.0 * np.sum(np.argmax(u, axis = 1) == y_test) / N_test))
+	print("Used time: %.4f"%(time()-begin_time))
 
-#####Calculate kernel values.
-#####Below we provide a naive implementation using for-loops.
-#####Parallelize this part according to your specific computing enviroment to utilize multiple GPUs.
-H = np.zeros((N, N), dtype = np.float32)
-for i in range(N):
-	for j in range(N):
-		H[i][j] = xz(X[i], X[j], L[i], L[j], iL[i], iL[j])
-#####
 
-#Solve kernel regression.
-Y_train = np.ones((N_train, 10)) * -0.1
-for i in range(N_train):
-	Y_train[i][y_train[i]] = 0.9
-u = H[N_train:, :N_train].dot(scipy.linalg.solve(H[:N_train, :N_train], Y_train))
-print "test accuracy:", 1.0 * np.sum(np.argmax(u, axis = 1) == y_test) / N_test
+# def load_cifar2(path = "../../../datasets/cifar-10-batches-py"):
+# 	train_batches = []
+# 	train_labels = []
+# 	for i in range(1, 6):
+# 		cifar_out = pickle.load(open(os.path.join(path, "data_batch_{0}".format(i)), 'rb'), encoding='bytes')
+# 		train_batches.append(cifar_out[b"data"])
+# 		train_labels.extend(cifar_out[b"labels"])
+# 	X_train= np.vstack(tuple(train_batches)).reshape(-1, 3, 32, 32)
+# 	y_train = np.array(train_labels)
+# 	cifar_out = pickle.load(open(os.path.join(path, "test_batch"), 'rb'), encoding='bytes')
+# 	X_test = cifar_out[b"data"].reshape(-1, 3, 32, 32)
+# 	y_test = cifar_out[b"labels"]
+# 	return (X_train, np.array(y_train)), (X_test, np.array(y_test))
+
+
+# (X_train2, y_train2), (X_test2, y_test2) = load_cifar2('/fs/vulcan-datasets/cifar-10-python')
+
+# os.mkdir('tmp')
+
+# for test_id in range(32):
+# 	img = Image.fromarray(X_train2[test_id].transpose(1, 2, 0))
+# 	if not os.path.exists('tmp/test%d'%test_id):
+# 		os.mkdir('tmp/test%d'%test_id)
+# 	img.save('tmp/test%d/test%d.png'%(test_id, test_id))
+# 	ids = (-H[N_train+test_id][:N_train]).argsort()[:100]
+# 	for i, id in enumerate(ids):
+# 		img = Image.fromarray(X_train2[id].transpose(1, 2, 0))
+# 		img.save('tmp/test%d/train%d.png'%(test_id, i))
